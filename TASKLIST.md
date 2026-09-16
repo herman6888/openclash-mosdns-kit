@@ -36,20 +36,20 @@
 
 ### 🔄 进行中
 - [ ] T10 writer 流水线出稿（PM 已接单，待派阿写→阿编审查→回报）
-      检查方式：`node gc.js watch DNSOPT2026X7K2 mu3o96vd0z2zml "烧卖-调度3" --wait 60`
+      检查方式：`cd /home/herman/Projects/content-dns && node gc.js watch DNSOPT2026X7K2 mu3o96vd0z2zml "烧卖-调度3" --wait 90`
       或读工作区文件：xhs-dns.md / wechat-dns.md
-      状态：13:55 仍未出稿，PM 在读工单中
-- [ ] T11 填充 kit 仓库：README.md（OpenClash 方案说明 + 架构图 + 实测数据）  ← 当前在做
-- [ ] T12 kit 一键安装脚本 install.sh
-      钩子蓝本（路由器实测可用）：
-      * ruby_edit nameserver→['127.0.0.1:5350']
-      * ruby_edit default-nameserver→['223.5.5.5']（纯 IP，clash 解析上游用）
-      * ruby_delete fallback / fallback-filter
-      * nameserver-policy 代理域名直连（自动从现有配置探测，不写死）
-      * uci en_mode=redir-host + operation_mode=redir-host
+      状态：14:00 仍未出稿，PM 接单后未派阿写，需催
+
+### ✅ 已完成（续）
+- [x] T11 kit README.md（架构图 + 实测数据 + de_GWD 对比表）
+- [x] T12 kit install.sh（arch 自适应 + 订阅域名自动探测防死锁 + 幂等 + 备份）
+      ⚠️ 探测逻辑修正：只抓订阅 address 的 host（防死锁刚需），代理节点 server 交 mosdns 境外序列
+- [x] T12b kit uninstall.sh（停服务 + 还原钩子/UCI + 删文件 + 重启）
+- [x] T13 kit push + 验证可 clone（/tmp/kit-verify 实测通过）
+      仓库：https://github.com/herman6888/openclash-mosdns-kit
+      文件：install.sh / uninstall.sh / README.md / TASKLIST.md
 
 ### ⬜ 待办
-- [ ] T13 kit 仓库 push + 验证可 clone
 - [ ] T14 私信自动回复方案研究结论 + 给 Herman 决策建议（见下方"私信研究"）
 - [ ] T15 文章里"回复想要→私信"引导语的落地方式（取决于 T14 结论）
 
