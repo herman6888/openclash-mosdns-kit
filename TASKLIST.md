@@ -49,9 +49,30 @@
       仓库：https://github.com/herman6888/openclash-mosdns-kit
       文件：install.sh / uninstall.sh / README.md / TASKLIST.md
 
-### ⬜ 待办
-- [ ] T14 私信自动回复方案研究结论 + 给 Herman 决策建议（见下方"私信研究"）
-- [ ] T15 文章里"回复想要→私信"引导语的落地方式（取决于 T14 结论）
+### ✅ 已完成（续）
+- [x] T10 writer 流水线出稿 + 阿编五问审查 + 3 条必改全修
+      审查结论：撞题不撞点（mosdns 生态都是组合方案角度，本文"零代理单程序"差异化）
+      修复：①wechat"不需要任何插件"→"除 mosdns 外无其他插件"（消矛盾）
+            ②wechat 补双层缓存段，正文 1583 字过 1500 下限
+            ③xhs"十几分钟"→"10 分钟左右"对齐简报
+            ④口径统一 10 站点→7 站点（与实测表严格一致，三文件同步）
+      ⚠️ 发布前必删两稿尾部【平台自检】【需补查】区块（含禁词字面"代理"）
+- [x] T14 私信研究 → Herman 拍板 A+B 合规方案
+- [x] T15 引流机制落地（A+B）：
+      脚本 ~/.hermes/scripts/xhs-want-watch/detect_wants.py
+      链路：search 自己笔记标题→新鲜 xsec_token 签名 URL→comments→匹配"想要"词→飞书提醒人工
+      cron b3cba8048cbc 每 30m，--no-agent 模式，无新评论静默，有则投飞书 DM
+      合规：不自动私信、不发外链，只提醒 Herman 人工私信引导进官方粉丝群
+      配置 ~/.hermes/scripts/xhs-want-watch/config.json（author/note_keywords/send_target）
+      发布 DNS 笔记后：把笔记标题加进 config.json 的 note_keywords 即纳入监控
+
+## 发布前检查清单（Herman 手动发布时）
+1. 删 xhs-dns.md / wechat-dns.md 尾部【平台自检】【需补查】区块
+2. 小红书正文零外链，引流话术指向公众号
+3. 公众号文末放 kit repo 链接（公众号可放外链）
+4. 开小红书官方粉丝群，群内发 repo
+5. 发布后把笔记标题加进 detect_wants.py 的 config.json note_keywords
+6. 收到飞书"想要"提醒后，人工私信引导进粉丝群（勿发外链）
 
 ---
 
