@@ -2,8 +2,6 @@
 
 给 **OpenClash** 加一层 [mosdns](https://github.com/IrineSistiana/mosdns)：国内域名**并发竞速** + **污染自动识别丢弃** + **本地缓存**，把网页 DNS 解析从"单线路傻等超时"变成"多路并发取最快"。
 
-灵感来自已停更的 [jacyl4/de_GWD](https://github.com/jacyl4/de_GWD)（2019–2025，478★）。本 kit 把它的 DNS 分流核心（`resp_ip` 网段比对防污染 + 竞速）单独抽出来，做成 OpenClash 一键安装，去掉了原项目的其他组件依赖。
-
 > ⚠️ 本工具**只优化 DNS 解析路径**，不改变任何代理出口规则。装它不会让你"翻"得更快，它解决的是"解析慢、解析被带偏"。
 
 ## 它解决什么问题
@@ -98,16 +96,6 @@ sh uninstall.sh
 2. 污染判定依赖 `IPchnroute` 准确性，个别 CDN IP 变更会误判（表现为该域名重查慢 100ms，仍能拿到答案），定期更新规则表即可。
 3. redir-host 模式下个别强依赖 fake-ip 的 APP 可能需要额外白名单。
 4. 加密备份上游是国内服务器，纯国内环境即可连通。
-
-## 与 de_GWD 的关系
-
-| | de_GWD | 本 kit |
-|---|---|---|
-| 状态 | 已停更 | 维护中 |
-| 形态 | Debian 网关全家桶 | OpenClash 单加层 |
-| DNS 核心 | mosdns 双 sequence | 同款竞速 + resp_ip 防污染 |
-| 广告屏蔽 | Pi-hole | 交给 OpenClash 订阅拦截规则 |
-| 安装 | 交互式脚本 | 一键 + 卸载脚本 |
 
 ## License
 

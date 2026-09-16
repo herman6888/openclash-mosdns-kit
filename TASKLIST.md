@@ -1,4 +1,4 @@
-# TASKLIST — DNS 优化项目（de_GWD 移植 + 内容流水线 + 引流私信）
+# TASKLIST — DNS 优化项目（mosdns 竞速分流 + 内容流水线 + 引流私信）
 
 > 跨上下文压缩的权威进度表。每完成一步立即更新本文件。
 > 最后更新：2026-09-16 13:55 HKT
@@ -24,7 +24,7 @@
 ## 任务清单
 
 ### ✅ 已完成
-- [x] T1 de_GWD 源码审计，定位"丝滑"来源（mosdns 双 sequence + resp_ip 防污染）
+- [x] T1 DNS 竞速方案源码审计，定位"丝滑"来源（mosdns 双 sequence + resp_ip 防污染）
 - [x] T2 路由器线上部署 P1+P2（redir-host + mosdns 竞速），实测验证通过
 - [x] T3 回答 Pi-hole：不需要（订阅 7276 条拦截规则已覆盖广告屏蔽）
 - [x] T4 写 gbrain 日志（含 4 条选题候选）
@@ -41,7 +41,7 @@
       状态：14:00 仍未出稿，PM 接单后未派阿写，需催
 
 ### ✅ 已完成（续）
-- [x] T11 kit README.md（架构图 + 实测数据 + de_GWD 对比表）
+- [x] T11 kit README.md（架构图 + 实测数据 + 方案对比表）
 - [x] T12 kit install.sh（arch 自适应 + 订阅域名自动探测防死锁 + 幂等 + 备份）
       ⚠️ 探测逻辑修正：只抓订阅 address 的 host（防死锁刚需），代理节点 server 交 mosdns 境外序列
 - [x] T12b kit uninstall.sh（停服务 + 还原钩子/UCI + 删文件 + 重启）
