@@ -303,6 +303,54 @@ log "重启 OpenClash（约 5-10 秒网络抖动）..."
 sleep 8
 
 # ---------------------------------------------------------------------------
+# 10.5 部署每日规则表同步（保持 CN 分流表持续更新）
+# ---------------------------------------------------------------------------
+log "部署每日规则表同步脚本..."
+SYNC_SCRIPT="/root/mosdns-rule-sync.sh"
+cat > "$SYNC_SCRIPT" <<SYNCEOF
+#!/bin/sh
+# mosdns 分流规则表每日同步（自动维护，勿手改）
+set -u
+INSTALL_DIR="/etc/mosdns"
+IP_TABLE="\$INSTALL_DIR/IPchnroute"
+DOM_TABLE="\$INSTALL_DIR/Domains.chn.txt"
+LOG="/var/log/mosdns-sync.log"
+SRC_IP="${GH_PROXY}https://raw.githubusercontent.com/herman6888/openclash-mosdns-kit/main/data/IPchnroute"
+SRC_DOM="${GH_PROXY}https://raw.githubusercontent.com/herman6888/openclash-mosdns-kit/main/data/Domains.chn.txt"
+MIN_IP=5000; MIN_DOM=50000
+log() { echo "[\$(date '+%F %T')] \$*" >> "\$LOG"; }
+TMP_IP="/tmp/sync_IP.\$\$.tmp"; TMP_DOM="/tmp/sync_DOM.\$\$.tmp"
+trap 'rm -f "\$TMP_IP" "\$TMP_DOM"' EXIT
+fetch() { if command -v curl >/dev/null 2>&1; then curl -fsSL --max-time 40 "\$1" -o "\$2"; else wget -q -T 40 "\$1" -O "\$2"; fi; }
+log "=== 同步开始 ==="
+fetch "\$SRC_IP" "\$TMP_IP" || { log "✗ IP 表下载失败，保留旧表"; exit 1; }
+fetch "\$SRC_DOM" "\$TMP_DOM" || { log "✗ 域名表下载失败，保留旧表"; exit 1; }
+IP_N=\$(wc -l < "\$TMP_IP" 2>/dev/null || echo 0); DOM_N=\$(wc -l < "\$TMP_DOM" 2>/dev/null || echo 0)
+[ "\$IP_N" -ge "\$MIN_IP" ] || { log "✗ IP 表行数异常(\$IP_N)，拒绝替换"; exit 1; }
+[ "\$DOM_N" -ge "\$MIN_DOM" ] || { log "✗ 域名表行数异常(\$DOM_N)，拒绝替换"; exit 1; }
+BAD_IP=\$(grep -cvE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+\$' "\$TMP_IP" 2>/dev/null || true)
+BLANK=\$(grep -cE '^[[:space:]]*\$' "\$TMP_IP" 2>/dev/null || true)
+[ \$((BAD_IP - BLANK)) -le 0 ] || { log "✗ IP 表含非规范行，拒绝替换"; exit 1; }
+if [ -f "\$IP_TABLE" ] && cmp -s "\$TMP_IP" "\$IP_TABLE" && [ -f "\$DOM_TABLE" ] && cmp -s "\$TMP_DOM" "\$DOM_TABLE"; then
+    log "无变化(IP=\$IP_N DOM=\$DOM_N)，跳过"; exit 0; fi
+STAMP=\$(date +%Y%m%d-%H%M%S)
+[ -f "\$IP_TABLE" ] && cp -a "\$IP_TABLE" "\$IP_TABLE.bak-\$STAMP"
+[ -f "\$DOM_TABLE" ] && cp -a "\$DOM_TABLE" "\$DOM_TABLE.bak-\$STAMP"
+mv -f "\$TMP_IP" "\$IP_TABLE"; mv -f "\$TMP_DOM" "\$DOM_TABLE"; trap - EXIT
+/etc/init.d/mosdns restart 2>>"\$LOG"; sleep 2
+if pidof mosdns >/dev/null 2>&1; then
+    log "✓ 同步完成 IP=\$IP_N 域名=\$DOM_N"; find "\$INSTALL_DIR" -name '*.bak-*' -mtime +7 -delete 2>/dev/null; exit 0
+else
+    log "✗ 重启失败，回滚"; cp -a "\$IP_TABLE.bak-\$STAMP" "\$IP_TABLE" 2>/dev/null; cp -a "\$DOM_TABLE.bak-\$STAMP" "\$DOM_TABLE" 2>/dev/null; /etc/init.d/mosdns restart 2>>"\$LOG"; exit 1
+fi
+SYNCEOF
+chmod +x "$SYNC_SCRIPT"
+# 加每日 cron（幂等，避开常见整点）
+( crontab -l 2>/dev/null | grep -v "mosdns-rule-sync"
+  echo "30 3 * * * /bin/sh $SYNC_SCRIPT # mosdns-rule-sync" ) | crontab - 2>/dev/null
+log "每日同步已部署：$SYNC_SCRIPT（cron 03:30）"
+
+# ---------------------------------------------------------------------------
 # 11. 验证
 # ---------------------------------------------------------------------------
 log "验证..."
