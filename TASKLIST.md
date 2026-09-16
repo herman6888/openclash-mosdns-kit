@@ -68,10 +68,11 @@
 
 - [x] T16 分流规则表换持续维护的活源 + 每日自动同步
       验证：新表为旧表严格超集（真遗漏 0 段），格式纯 IPv4 CIDR 无语法变更
-      链路：维护者每日刷新公开仓库 data/ 镜像 -> 路由器每日 03:30 拉镜像 -> 校验 -> 原子替换 -> 重启 mosdns
-      失败保护：行数下限 + CIDR 规范校验 + 重启失败自动回滚旧表
-      公开仓库零第三方源名（中性镜像，commit 用中性 message）
-      实测：路由器生产表已更新至 IP=6728 / 域名=110448，解析正常
+      链路：GitHub Actions 每日 02:30 HKT 刷新公开仓库 data/ 镜像 -> 路由器每日 03:30 拉镜像 -> 校验 -> 原子替换 -> 重启 mosdns
+      失败保护：行数下限 + CIDR 规范校验 + HTML 错误页检测 + 重启失败自动回滚旧表
+      公开仓库零第三方源名（源 URL 存 GitHub Secrets，workflow 只引用变量名；commit 用中性 message）
+      实测：Actions run success（IP valid=6728 malformed=0 / domain lines=110448）；路由器生产表已更新至 IP=6728 / 域名=110448，解析正常
+      优势：不依赖个人机器在线，公共仓库 Actions 免费，可靠性高于本机 cron
 
 ## 发布前检查清单（Herman 手动发布时）
 1. 删 xhs-dns.md / wechat-dns.md 尾部【平台自检】【需补查】区块
