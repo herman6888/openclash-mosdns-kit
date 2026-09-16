@@ -1,0 +1,83 @@
+name: sync-rule-tables
+
+# 每日同步 CN 分流表（源 URL 存 Secrets，本文件不暴露来源）
+# 18:30 UTC = 02:30 HKT，比路由器 03:30 拉取早一小时留缓冲
+on:
+  schedule:
+    - cron: '30 18 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch upstream
+        env:
+          IP_URL: ${{ secrets.RULE_IP_URL }}
+          DOM_URL: ${{ secrets.RULE_DOMAIN_URL }}
+        run: |
+          set -euo pipefail
+          fetch() {
+            local url="$1" out="$2" i
+            for i in 1 2 3 4 5; do
+              if curl -fsSL --connect-timeout 15 --max-time 120 "$url" -o "$out"; then
+                return 0
+              fi
+              echo "retry $i for $out"
+              sleep 5
+            done
+            echo "FAILED to fetch $out"
+            return 1
+          }
+          fetch "$IP_URL" /tmp/ip.new
+          fetch "$DOM_URL" /tmp/dom.new
+
+      - name: Validate
+        run: |
+          set -euo pipefail
+          # IP 表：每个非空行必须是规范 IPv4 CIDR
+          ip_ok=$(awk 'NF==0{next} /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/{ok++;next} {bad++} END{print ok+0}' /tmp/ip.new)
+          ip_bad=$(awk 'NF==0{next} /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/{next} {bad++} END{print bad+0}' /tmp/ip.new)
+          echo "IP valid=$ip_ok malformed=$ip_bad"
+          [ "$ip_ok" -ge 5000 ] || { echo "FAIL: IP table too small"; exit 1; }
+          [ "$ip_bad" -eq 0 ] || { echo "FAIL: IP table has malformed lines"; exit 1; }
+
+          # 域名表：行数下限 + 不是 HTML 错误页
+          dom_lines=$(grep -cve '^[[:space:]]*$' /tmp/dom.new || true)
+          echo "domain lines=$dom_lines"
+          [ "$dom_lines" -ge 50000 ] || { echo "FAIL: domain table too small"; exit 1; }
+          if grep -qi '<html' /tmp/dom.new; then
+            echo "FAIL: domain table looks like HTML"
+            exit 1
+          fi
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          changed=0
+          if ! cmp -s /tmp/ip.new data/IPchnroute; then
+            cp /tmp/ip.new data/IPchnroute
+            changed=1
+            echo "IP table changed"
+          fi
+          if ! cmp -s /tmp/dom.new data/Domains.chn.txt; then
+            cp /tmp/dom.new data/Domains.chn.txt
+            changed=1
+            echo "domain table changed"
+          fi
+          if [ "$changed" -eq 1 ]; then
+            git config user.name "rule-sync-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add data/IPchnroute data/Domains.chn.txt
+            git commit -m "chore: sync CN rule tables ($(date -u +%Y-%m-%d))"
+            git push
+            echo "PUSHED"
+          else
+            echo "NO CHANGE"
+          fi
