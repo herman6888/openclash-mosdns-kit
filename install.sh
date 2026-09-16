@@ -21,7 +21,7 @@ CHN_UP2="119.29.29.29:53"   # 腾讯 DNSPod
 # 加密备份上游（国内可达 DoH，不依赖任何代理）
 BAK_UP1="https://dns.alidns.com/dns-query"
 BAK_UP2="https://doh.pub/dns-query"
-# 规则表源（某停更方案 作者维护）
+# 规则表源（CN 网段/域名分流表，每日自动更新）
 RULE_BASE="https://raw.githubusercontent.com/herman6888/openclash-mosdns-kit/main/data"
 # GitHub 加速前缀（国内访问 raw.githubusercontent 受阻时改成 https://gh-proxy.com/）
 GH_PROXY=""
