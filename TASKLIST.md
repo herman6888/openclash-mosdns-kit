@@ -55,19 +55,23 @@
 
 ---
 
-## 私信研究（T14 进行中，已查明的事实）
-- opencli xiaohongshu **无 DM/私信命令**（只有 notifications/comments/creator-* 读命令）
-- `hermes send` 仅支持 telegram/discord/slack/signal，**不支持小红书**
-- 小红书平台规则（web 查证）：
-  * 2026-01-07 起专业号私信自动回复组件**禁止留微信/电话**，只能用"社媒名片"导流
-  * 自动私信/频繁留联系方式 = 禁言/限流/封号高风险
-  * "回复想要→私信发链接"若私信内容含外部链接/联系方式，踩红线
-- 待给 Herman 的选项：
-  A. 不做自动私信，改用"评论区置顶 + 个人主页/群聊引导"（合规，但转化弱）
-  B. 私信只发"已关注请查收站内信/加群"不含外链联系方式，人工兜底（中风险）
-  C. 用小红书官方"群聊/粉丝群"功能承接，AI 在群内发 repo 链接（相对合规）
-  D. 坚持自动私信发 GitHub 链接 = 高封号风险，不建议
-- 结论待整理成决策点交 Herman 拍板（发布/私信属人工批准范围）
+## 私信研究（T14 已完成研究，待 Herman 拍板）
+### 技术可行性（实测 opencli + 平台规则查证）
+- opencli xiaohongshu 命令全集：ask/comments/creator-*/download/draft-*/feed/follow/liked/login/note/notifications/publish/saved/search/unfollow/user/whoami
+  → **无 DM/私信/回复评论/发消息命令**。检测"想要"可行（comments/notifications 读），发送侧 opencli 不支持
+- hermes send 仅 telegram/discord/slack/signal，**不支持小红书**
+- 要发私信/回评只能走浏览器自动化（opencli browser eval / browser_exec 操作 creator 后台或 xiaohongshu.com/im），脆弱且易触发风控
+### 平台规则（web 查证，2026 现行）
+- 2026-01-07 起专业号私信自动回复组件**禁止留微信/电话**，只能用"社媒名片"导流
+- 自动私信/频繁留联系方式 = 禁言/限流/封号高风险；GitHub 外链本身也算"导流第三方"
+- 第三方工具（油猴 XHS-YYDS、影刀 RPA、语聚AI）均存在但都带封号风险，非官方接口
+### 给 Herman 的选项（风险递增）
+- A 合规·转化弱：不做自动私信。文末引导"关注+点赞+收藏"，repo 链接放公众号（公众号可放外链），小红书只引流到公众号
+- B 合规·中转化：开小红书官方"粉丝群/群聊"，AI 在群内发 repo（站内功能，相对安全）
+- C 中风险：浏览器自动化检测"想要"→评论区回复（不含外链，引导看主页/公众号），不碰私信
+- D 高风险·不建议：自动私信发 GitHub 链接 = 踩 2026 导流红线，封号风险高
+### 我的建议
+A + B 组合：小红书正文零外链引流到公众号，公众号文末放 kit repo；想要即时获取的引导进官方粉丝群。cron 只做"检测想要评论→提醒我人工回"，不自动发。
 
 ---
 
