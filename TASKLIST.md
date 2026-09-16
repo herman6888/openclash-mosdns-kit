@@ -66,6 +66,13 @@
       配置 ~/.hermes/scripts/xhs-want-watch/config.json（author/note_keywords/send_target）
       发布 DNS 笔记后：把笔记标题加进 config.json 的 note_keywords 即纳入监控
 
+- [x] T16 分流规则表换持续维护的活源 + 每日自动同步
+      验证：新表为旧表严格超集（真遗漏 0 段），格式纯 IPv4 CIDR 无语法变更
+      链路：维护者每日刷新公开仓库 data/ 镜像 -> 路由器每日 03:30 拉镜像 -> 校验 -> 原子替换 -> 重启 mosdns
+      失败保护：行数下限 + CIDR 规范校验 + 重启失败自动回滚旧表
+      公开仓库零第三方源名（中性镜像，commit 用中性 message）
+      实测：路由器生产表已更新至 IP=6728 / 域名=110448，解析正常
+
 ## 发布前检查清单（Herman 手动发布时）
 1. 删 xhs-dns.md / wechat-dns.md 尾部【平台自检】【需补查】区块
 2. 小红书正文零外链，引流话术指向公众号
