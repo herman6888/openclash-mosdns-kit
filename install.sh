@@ -24,9 +24,18 @@ MOSDNS_LISTEN="127.0.0.1:5350"
 # 国内上游（并发竞速）
 CHN_UP1="223.5.5.5:53"      # 阿里 DNS
 CHN_UP2="119.29.29.29:53"   # 腾讯 DNSPod
-# 加密备份上游（国内可达 DoH，不依赖任何代理）
-BAK_UP1="https://dns.alidns.com/dns-query"
-BAK_UP2="https://doh.pub/dns-query"
+# 加密备份上游（境外域名用，必须答案干净）
+# ⚠ 实测教训：阿里 dns.alidns.com / 腾讯 doh.pub 是【境内】DoH，
+#   对境外被墙域名返回的正是污染答案（youtube→Twitter段/Facebook段）。
+#   境外序列必须用境外 DoH：dns.google / cloudflare-dns.com（443 直连可达且答案干净）。
+BAK_UP1="https://dns.google/dns-query"
+BAK_UP2="https://cloudflare-dns.com/dns-query"
+# DoH bootstrap：解析 DoH 域名本身所用的 DNS 解析器（53 端口），
+# 关键——mosdns 解析 DoH 域名不能走系统 resolv.conf（=dnsmasq→clash→mosdns 死循环）。
+# ⚠ bootstrap 必须是「53 端口能解析该域名」的解析器 IP，不是 DoH 服务器自己的 IP。
+#   实测：223.5.5.5:53 可干净解析 dns.google→8.8.8.8 / cloudflare-dns.com。
+BAK_BOOT1="223.5.5.5"
+BAK_BOOT2="223.5.5.5"
 # 规则表源（CN 网段/域名分流表，每日自动更新）
 RULE_BASE="https://raw.githubusercontent.com/herman6888/openclash-mosdns-kit/main/data"
 # GitHub 加速前缀（国内访问 raw.githubusercontent 受阻时改成 https://gh-proxy.com/）
@@ -56,6 +65,43 @@ fetch() {
     else
         die "系统无 curl/wget"
     fi
+}
+
+# 安全写入 OpenClash 接管钩子。
+# ⚠ OpenClash 自带模板以 `exit 0` 结尾且**不带换行符**，直接 `cat >>` 会粘成
+#   `exit 0# >>> ...`，shell 走到 exit 0 就退出 → 接管代码变成永不执行的死代码。
+#   所以必须先剥掉尾部空行与 exit 0，再追加，最后自己补一个 exit 0。
+write_takeover_hook() {
+    NSP_ARG="$1"
+    mkdir -p "${OCC_DIR:-$(dirname "$OCC_HOOK")}"
+    if [ -f "$OCC_HOOK" ]; then
+        # 幂等：清掉上一次写入的接管段
+        sed -i '/# >>> openclash-mosdns-kit/,/# <<< openclash-mosdns-kit/d' "$OCC_HOOK"
+        # 去掉尾部空行（awk 全量重写，文件仅数 KB）
+        awk '{ L[NR]=$0 } END { k=NR; while (k>0 && L[k] ~ /^[ \t]*$/) k--; for (i=1;i<=k;i++) print L[i] }' \
+            "$OCC_HOOK" > "$OCC_HOOK.tmp" && mv "$OCC_HOOK.tmp" "$OCC_HOOK"
+        # 逐层剥掉尾部的 exit 0
+        while [ -s "$OCC_HOOK" ] && [ "$(tail -1 "$OCC_HOOK" | tr -d ' \t')" = "exit0" ]; do
+            sed -i '$d' "$OCC_HOOK"
+        done
+    else
+        printf '#!/bin/sh\n. /usr/share/openclash/ruby.sh\n. /usr/share/openclash/log.sh\n. /lib/functions.sh\nCONFIG_FILE="$1"\n[ -f "$CONFIG_FILE" ] || exit 0\n' > "$OCC_HOOK"
+    fi
+    # 保底：EOF 必须有换行，否则又会粘连
+    [ -s "$OCC_HOOK" ] && [ "$(tail -c 1 "$OCC_HOOK" | wc -l)" -eq 0 ] && echo "" >> "$OCC_HOOK"
+
+    {
+        echo "# >>> openclash-mosdns-kit"
+        echo 'LOG_OUT "Tip: openclash-mosdns-kit DNS takeover running..."'
+        echo "ruby_edit \"\$CONFIG_FILE\" \"['dns']['nameserver']\" \"['${MOSDNS_LISTEN}']\""
+        echo "ruby_edit \"\$CONFIG_FILE\" \"['dns']['default-nameserver']\" \"['223.5.5.5']\""
+        echo "ruby_delete \"\$CONFIG_FILE\" \"['dns']\" \"fallback\""
+        echo "ruby_delete \"\$CONFIG_FILE\" \"['dns']\" \"fallback-filter\""
+        [ -n "$NSP_ARG" ] && echo "ruby_edit \"\$CONFIG_FILE\" \"['dns']['nameserver-policy']\" \"${NSP_ARG}\""
+        echo "# <<< openclash-mosdns-kit"
+        echo "exit 0"
+    } >> "$OCC_HOOK"
+    chmod +x "$OCC_HOOK"
 }
 
 # ---------------------------------------------------------------------------
@@ -119,21 +165,36 @@ log "备份目录: $BACKUP_DIR"
 # ---------------------------------------------------------------------------
 mkdir -p "$INSTALL_DIR"
 cd /tmp
-log "下载 mosdns v$MOSDNS_VERSION ..."
-DL_URL="${GH_PROXY}https://github.com/IrineSistiana/mosdns/releases/download/v${MOSDNS_VERSION}/${MOS_PKG}"
-fetch "$DL_URL" /tmp/mosdns.zip || die "下载失败: $DL_URL（试设 GH_PROXY 加速）"
-command -v unzip >/dev/null 2>&1 || die "需要 unzip（opkg update && opkg install unzip）"
-unzip -o mosdns.zip mosdns >/dev/null 2>&1 || unzip -o mosdns.zip >/dev/null
-[ -f /tmp/mosdns ] || die "解压后找不到 mosdns 二进制"
-mv -f /tmp/mosdns "$BIN"
-chmod +x "$BIN"
-log "mosdns 已安装: $("$BIN" version 2>&1 | head -1)"
+# 幂等：已装且版本一致就跳过（省 20MB，也让重试不必重下）
+# 注意：跳过下载时也必须跳过 unzip/mv，否则会拿 /tmp 里的陈旧 zip 覆盖现有二进制
+CUR_VER="$([ -x "$BIN" ] && "$BIN" version 2>/dev/null | head -1 | tr -d 'v' | cut -d- -f1 || true)"
+if [ "$CUR_VER" = "$MOSDNS_VERSION" ]; then
+    log "已安装 mosdns v$MOSDNS_VERSION，跳过下载与解压"
+else
+    log "下载 mosdns v$MOSDNS_VERSION ..."
+    rm -f /tmp/mosdns.zip /tmp/mosdns
+    DL_PATH="https://github.com/IrineSistiana/mosdns/releases/download/v${MOSDNS_VERSION}/${MOS_PKG}"
+    OK=0
+    # 先试用户指定前缀，再试直连，最后试公共加速站
+    for pre in "${GH_PROXY}" "" "https://gh-proxy.com/" "https://ghfast.top/"; do
+        [ "$OK" = "1" ] && break
+        log "  尝试源: ${pre:-（直连）}"
+        fetch "${pre}${DL_PATH}" /tmp/mosdns.zip && [ -s /tmp/mosdns.zip ] && OK=1
+    done
+    [ "$OK" = "1" ] || die "下载失败: $DL_PATH（GitHub 暂时不可达，稍后重试或手动放 zip 到 /tmp/mosdns.zip）"
+    command -v unzip >/dev/null 2>&1 || die "需要 unzip（opkg update && opkg install unzip）"
+    unzip -o mosdns.zip mosdns >/dev/null 2>&1 || unzip -o mosdns.zip >/dev/null
+    [ -f /tmp/mosdns ] || die "解压后找不到 mosdns 二进制"
+    mv -f /tmp/mosdns "$BIN"
+    chmod +x "$BIN"
+    log "mosdns 已安装: $("$BIN" version 2>&1 | head -1)"
+fi
 
 # ---------------------------------------------------------------------------
 # 4. 下载分流规则表
 # ---------------------------------------------------------------------------
 log "下载分流规则表（IPchnroute + Domains.chn.txt）..."
-for f in "IPchnroute" "mosdns_chnlist/Domains.chn.txt"; do
+for f in "IPchnroute" "Domains.chn.txt"; do
     out="$INSTALL_DIR/$(basename "$f")"
     fetch "${GH_PROXY}${RULE_BASE}/${f}" "$out" || die "规则表下载失败: $f"
 done
@@ -165,7 +226,9 @@ plugins:
       concurrent: 2
       upstreams:
         - addr: ${BAK_UP1}
+          bootstrap: "${BAK_BOOT1}"
         - addr: ${BAK_UP2}
+          bootstrap: "${BAK_BOOT2}"
 
   - tag: cache
     type: cache
@@ -293,24 +356,7 @@ takeover_openclash() {
     [ $first -eq 1 ] && NSP="{}"
 
     log "写 OpenClash DNS 接管钩子..."
-    mkdir -p "$OCC_DIR"
-    if [ -f "$OCC_HOOK" ]; then
-        sed -i '/# >>> openclash-mosdns-kit/,/# <<< openclash-mosdns-kit/d' "$OCC_HOOK"
-    fi
-    if [ ! -f "$OCC_HOOK" ]; then
-        printf '#!/bin/sh\n. /usr/share/openclash/ruby.sh\n. /usr/share/openclash/log.sh\n. /lib/functions.sh\nCONFIG_FILE="$1"\n[ -f "$CONFIG_FILE" ] || exit 0\n' > "$OCC_HOOK"
-    fi
-    cat >> "$OCC_HOOK" <<EOF
-# >>> openclash-mosdns-kit
-LOG_OUT "Tip: openclash-mosdns-kit DNS takeover running..."
-ruby_edit "\$CONFIG_FILE" "['dns']['nameserver']" "['${MOSDNS_LISTEN}']"
-ruby_edit "\$CONFIG_FILE" "['dns']['default-nameserver']" "['223.5.5.5']"
-ruby_delete "\$CONFIG_FILE" "['dns']" "fallback"
-ruby_delete "\$CONFIG_FILE" "['dns']" "fallback-filter"
-ruby_edit "\$CONFIG_FILE" "['dns']['nameserver-policy']" "${NSP}"
-# <<< openclash-mosdns-kit
-EOF
-    chmod +x "$OCC_HOOK"
+    write_takeover_hook "$NSP"
     log "钩子已写入 $OCC_HOOK"
 
     log "切换 OpenClash 到 redir-host（真实 IP 模式）..."
@@ -382,23 +428,7 @@ else
     takeover_dnsmasq
     if [ "$HAS_OC" = "1" ]; then
         log "预写 OpenClash 钩子（当前未启用，启用后自动接管）..."
-        mkdir -p "$OCC_DIR"
-        if [ -f "$OCC_HOOK" ]; then
-            sed -i '/# >>> openclash-mosdns-kit/,/# <<< openclash-mosdns-kit/d' "$OCC_HOOK"
-        fi
-        if [ ! -f "$OCC_HOOK" ]; then
-            printf '#!/bin/sh\n. /usr/share/openclash/ruby.sh\n. /usr/share/openclash/log.sh\n. /lib/functions.sh\nCONFIG_FILE="$1"\n[ -f "$CONFIG_FILE" ] || exit 0\n' > "$OCC_HOOK"
-        fi
-        cat >> "$OCC_HOOK" <<'EOF'
-# >>> openclash-mosdns-kit
-LOG_OUT "Tip: openclash-mosdns-kit DNS takeover running..."
-ruby_edit "$CONFIG_FILE" "['dns']['nameserver']" "['127.0.0.1:5350']"
-ruby_edit "$CONFIG_FILE" "['dns']['default-nameserver']" "['223.5.5.5']"
-ruby_delete "$CONFIG_FILE" "['dns']" "fallback"
-ruby_delete "$CONFIG_FILE" "['dns']" "fallback-filter"
-# <<< openclash-mosdns-kit
-EOF
-        chmod +x "$OCC_HOOK"
+        write_takeover_hook ""
     fi
 fi
 
