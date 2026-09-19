@@ -74,6 +74,17 @@
       实测：Actions run success（IP valid=6728 malformed=0 / domain lines=110448）；路由器生产表已更新至 IP=6728 / 域名=110448，解析正常
       优势：不依赖个人机器在线，公共仓库 Actions 免费，可靠性高于本机 cron
 
+- [x] T17 install.sh 自动检测 OpenClash，有无均可用
+      检测三信号：/etc/openclash 目录 + /etc/init.d/openclash + uci get openclash.config.enable
+      分支：已装且启用 → openclash 模式（钩子接管 + redir-host + 订阅域名直连）
+            装了未启用 / 没装 → dnsmasq 模式（dnsmasq 上游直连 mosdns + cachesize=0 + noresolv=1 + 关 wan6 peerdns）
+            装了未启用时额外预写 OpenClash 钩子，日后启用自动接上
+      模式记录在 /etc/mosdns/.kit-mode，uninstall.sh 据此还原对应侧
+      可选 HIJACK_LAN_DNS=1 + LAN_IF：nftables 劫持局域网 53 → mosdns:5350，持久化 /etc/nftables.d/mosdnshijack.nft
+      实测：检测逻辑 4 场景单测全对；路由器实跑证实「OpenClash watchdog 会强制把 dnsmasq 上游改回 clash:7874」
+            （openclash_watchdog.sh:381-388）→ 分支设计必需；临时 dnsmasq:5399→mosdns 链路验证拿到真实 IP
+      生产环境已还原（dhcp 备份 /tmp/dhcp.pretest.bak），解析正常
+
 ## 发布前检查清单（Herman 手动发布时）
 1. 删 xhs-dns.md / wechat-dns.md 尾部【平台自检】【需补查】区块
 2. 小红书正文零外链，引流话术指向公众号
