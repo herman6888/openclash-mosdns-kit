@@ -1,11 +1,17 @@
 #!/bin/sh
 # ============================================================================
 #  openclash-mosdns-kit — 一键安装
-#  给 OpenClash 加一层 mosdns：国内并发竞速 + resp_ip 防污染 + 本地缓存
-#  适配 OpenWrt / iStoreOS，需已装 OpenClash
+#  给路由器加一层 mosdns：国内并发竞速 + resp_ip 防污染 + 本地缓存
+#  适配 OpenWrt / iStoreOS，自动检测 OpenClash，有无均可用
 #
 #  用法：  sh install.sh
 #  卸载：  sh uninstall.sh
+#
+#  可选环境变量：
+#    HIJACK_LAN_DNS=1            无 OpenClash 时追加 nftables 劫持，强制局域网
+#                                里写死第三方 DNS 的设备也走 mosdns
+#    LAN_IF=br-lan               劫持生效的局域网接口（默认 br-lan）
+#    GH_PROXY=https://gh-proxy.com/  GitHub 访问受阻时设加速前缀
 #
 #  安全声明：本脚本只改 DNS 路径，不碰代理节点/订阅/出口规则。
 #           改前自动备份，可随时 uninstall 回滚。
@@ -24,31 +30,65 @@ BAK_UP2="https://doh.pub/dns-query"
 # 规则表源（CN 网段/域名分流表，每日自动更新）
 RULE_BASE="https://raw.githubusercontent.com/herman6888/openclash-mosdns-kit/main/data"
 # GitHub 加速前缀（国内访问 raw.githubusercontent 受阻时改成 https://gh-proxy.com/）
-GH_PROXY=""
+GH_PROXY="${GH_PROXY:-}"
 # 竞速阈值(ms)
 RACE_THRESHOLD="100"
+# 是否劫持局域网 53 端口（仅无 OpenClash 模式有意义）
+HIJACK_LAN_DNS="${HIJACK_LAN_DNS:-0}"
+LAN_IF="${LAN_IF:-br-lan}"
 
 INSTALL_DIR="/etc/mosdns"
 BIN="/usr/bin/mosdns"
 INIT="/etc/init.d/mosdns"
 OCC_DIR="/etc/openclash/custom"
 OCC_HOOK="$OCC_DIR/openclash_custom_overwrite.sh"
+MODE_FILE="$INSTALL_DIR/.kit-mode"
 BACKUP_DIR="/root/openclash-mosdns-kit-backup-$(date +%Y%m%d-%H%M%S)"
 
 log() { echo "[install] $*"; }
 die() { echo "[install][ERROR] $*" >&2; exit 1; }
 
+fetch() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --max-time 60 "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 60 "$1" -O "$2"
+    else
+        die "系统无 curl/wget"
+    fi
+}
+
 # ---------------------------------------------------------------------------
-# 0. 前置检查
+# 0. 前置检查 + 模式检测
 # ---------------------------------------------------------------------------
 [ "$(id -u)" = "0" ] || die "需要 root 运行"
 command -v uci >/dev/null 2>&1 || die "找不到 uci，这不是 OpenWrt/iStoreOS？"
 
-# 检测 OpenClash
-if [ ! -d /etc/openclash ]; then
-    die "未检测到 OpenClash（/etc/openclash 不存在）。本 kit 是给 OpenClash 加 DNS 层的，请先装 OpenClash。"
+# 自动检测 OpenClash：装了且启用 → 走 OpenClash 接管；否则直接接管 dnsmasq
+HAS_OC=0
+OC_ENABLED=""
+[ -d /etc/openclash ] && HAS_OC=1
+[ -f /etc/init.d/openclash ] || HAS_OC=0
+OC_ENABLED="$(uci get openclash.config.enable 2>/dev/null || true)"
+
+if [ "$HAS_OC" = "1" ] && [ "$OC_ENABLED" = "1" ]; then
+    KIT_MODE="openclash"
+    log "检测到已启用的 OpenClash → 接管模式：OpenClash DNS 指向 mosdns"
+else
+    KIT_MODE="dnsmasq"
+    if [ "$HAS_OC" = "1" ]; then
+        log "检测到 OpenClash 但未启用（enable=$OC_ENABLED）→ 接管模式：dnsmasq 直连 mosdns"
+        log "（同时预写 OpenClash 钩子，日后启用 OpenClash 会自动接上 mosdns）"
+    else
+        log "未检测到 OpenClash → 接管模式：dnsmasq 直连 mosdns"
+    fi
 fi
-log "检测到 OpenClash。"
+
+# 劫持模式下 mosdns 必须监听所有网卡，否则 nft redirect 送不到
+if [ "$KIT_MODE" = "dnsmasq" ] && [ "$HIJACK_LAN_DNS" = "1" ]; then
+    MOSDNS_LISTEN="0.0.0.0:5350"
+    log "已开启局域网 DNS 劫持，mosdns 监听改为 $MOSDNS_LISTEN"
+fi
 
 # ---------------------------------------------------------------------------
 # 1. 架构检测
@@ -69,7 +109,9 @@ log "架构: $ARCH → $MOS_PKG"
 # ---------------------------------------------------------------------------
 mkdir -p "$BACKUP_DIR"
 [ -f "$OCC_HOOK" ] && cp -a "$OCC_HOOK" "$BACKUP_DIR/openclash_custom_overwrite.sh.bak" && log "已备份原 OpenClash 钩子"
-uci show openclash > "$BACKUP_DIR/openclash.uci.bak" 2>/dev/null && log "已备份 openclash UCI"
+[ "$HAS_OC" = "1" ] && uci show openclash > "$BACKUP_DIR/openclash.uci.bak" 2>/dev/null && log "已备份 openclash UCI"
+# dnsmasq / dhcp 配置备份（两种模式都备，回滚用）
+cp -a /etc/config/dhcp "$BACKUP_DIR/dhcp.bak" 2>/dev/null && log "已备份 /etc/config/dhcp"
 log "备份目录: $BACKUP_DIR"
 
 # ---------------------------------------------------------------------------
@@ -79,13 +121,7 @@ mkdir -p "$INSTALL_DIR"
 cd /tmp
 log "下载 mosdns v$MOSDNS_VERSION ..."
 DL_URL="${GH_PROXY}https://github.com/IrineSistiana/mosdns/releases/download/v${MOSDNS_VERSION}/${MOS_PKG}"
-if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$DL_URL" -o mosdns.zip || die "下载失败: $DL_URL（试设 GH_PROXY 加速）"
-elif command -v wget >/dev/null 2>&1; then
-    wget -q "$DL_URL" -O mosdns.zip || die "下载失败: $DL_URL"
-else
-    die "系统无 curl/wget"
-fi
+fetch "$DL_URL" /tmp/mosdns.zip || die "下载失败: $DL_URL（试设 GH_PROXY 加速）"
 command -v unzip >/dev/null 2>&1 || die "需要 unzip（opkg update && opkg install unzip）"
 unzip -o mosdns.zip mosdns >/dev/null 2>&1 || unzip -o mosdns.zip >/dev/null
 [ -f /tmp/mosdns ] || die "解压后找不到 mosdns 二进制"
@@ -99,11 +135,7 @@ log "mosdns 已安装: $("$BIN" version 2>&1 | head -1)"
 log "下载分流规则表（IPchnroute + Domains.chn.txt）..."
 for f in "IPchnroute" "mosdns_chnlist/Domains.chn.txt"; do
     out="$INSTALL_DIR/$(basename "$f")"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "${GH_PROXY}${RULE_BASE}/${f}" -o "$out" || die "规则表下载失败: $f"
-    else
-        wget -q "${GH_PROXY}${RULE_BASE}/${f}" -O "$out" || die "规则表下载失败: $f"
-    fi
+    fetch "${GH_PROXY}${RULE_BASE}/${f}" "$out" || die "规则表下载失败: $f"
 done
 IP_LINES=$(wc -l < "$INSTALL_DIR/IPchnroute" 2>/dev/null || echo 0)
 DOM_LINES=$(wc -l < "$INSTALL_DIR/Domains.chn.txt" 2>/dev/null || echo 0)
@@ -222,59 +254,53 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7. 自动探测订阅域名（防 DNS↔代理死锁）
+# 7A. 接管路径：OpenClash 已启用
 # ---------------------------------------------------------------------------
-# 说明：OpenClash 要 HTTP 拉订阅、要连代理节点。真正必须"直连解析"的是
-#       订阅地址的 host（否则拉订阅这一步就卡住）。代理节点 server 域名
-#       走 mosdns 境外序列拿真实 IP 即可，解析本身不经代理，不会死锁。
-log "探测订阅地址 host（这些直连解析，防死锁）..."
-PROXY_HOSTS=""
-# 从 UCI 抓所有订阅 address 的 host
-idx=0
-while true; do
-    addr=$(uci get openclash.@config_subscribe[${idx}].address 2>/dev/null) || break
-    [ -z "$addr" ] && break
-    h=$(echo "$addr" | sed -E 's#https?://##; s#/.*##; s#:[0-9]+$##')
-    PROXY_HOSTS="$PROXY_HOSTS $h"
-    idx=$((idx+1))
-done
-# 去重、去空、去本地/纯IP（本地 IP 无需 nameserver-policy）
-PROXY_HOSTS=$(echo "$PROXY_HOSTS" | tr ' ' '\n' | grep -vE '^$|^[0-9.]+$' | sort -u)
-if [ -z "$PROXY_HOSTS" ]; then
-    log "⚠ 未探测到订阅域名，nameserver-policy 将为空（不影响 DNS 优化，仅订阅更新可能受影响）"
-else
-    log "探测到订阅域名: $(echo $PROXY_HOSTS)"
-fi
+takeover_openclash() {
+    # 自动探测订阅域名（防 DNS↔代理死锁）
+    # 说明：OpenClash 要 HTTP 拉订阅、要连代理节点。真正必须"直连解析"的是
+    #       订阅地址的 host（否则拉订阅这一步就卡住）。代理节点 server 域名
+    #       走 mosdns 境外序列拿真实 IP 即可，解析本身不经代理，不会死锁。
+    log "探测订阅地址 host（这些直连解析，防死锁）..."
+    PROXY_HOSTS=""
+    idx=0
+    while true; do
+        addr=$(uci get openclash.@config_subscribe[${idx}].address 2>/dev/null) || break
+        [ -z "$addr" ] && break
+        h=$(echo "$addr" | sed -E 's#https?://##; s#/.*##; s#:[0-9]+$##')
+        PROXY_HOSTS="$PROXY_HOSTS $h"
+        idx=$((idx+1))
+    done
+    PROXY_HOSTS=$(echo "$PROXY_HOSTS" | tr ' ' '\n' | grep -vE '^$|^[0-9.]+$' | sort -u)
+    if [ -z "$PROXY_HOSTS" ]; then
+        log "⚠ 未探测到订阅域名，nameserver-policy 将为空（不影响 DNS 优化，仅订阅更新可能受影响）"
+    else
+        log "探测到订阅域名: $(echo $PROXY_HOSTS)"
+    fi
 
-# 直连解析用的上游（纯 IP，避免解析这个 IP 又要走 DNS）
-DIRECT_DNS="223.5.5.5"
+    # 直连解析用的上游（纯 IP，避免解析这个 IP 又要走 DNS）
+    DIRECT_DNS="223.5.5.5"
 
-# 构造 nameserver-policy 的 ruby hash 字符串
-NSP="{"
-first=1
-for h in $PROXY_HOSTS; do
-    [ $first -eq 0 ] && NSP="$NSP,"
-    NSP="$NSP'$h'=>'udp://${DIRECT_DNS}:53'"
-    first=0
-done
-NSP="$NSP}"
-[ $first -eq 1 ] && NSP="{}"   # 没探测到就空
+    # 构造 nameserver-policy 的 ruby hash 字符串
+    NSP="{"
+    first=1
+    for h in $PROXY_HOSTS; do
+        [ $first -eq 0 ] && NSP="$NSP,"
+        NSP="$NSP'$h'=>'udp://${DIRECT_DNS}:53'"
+        first=0
+    done
+    NSP="$NSP}"
+    [ $first -eq 1 ] && NSP="{}"
 
-# ---------------------------------------------------------------------------
-# 8. 写 OpenClash 接管钩子
-# ---------------------------------------------------------------------------
-log "写 OpenClash DNS 接管钩子..."
-mkdir -p "$OCC_DIR"
-# 若已有钩子，备份并追加我们的段（用标记幂等）
-if [ -f "$OCC_HOOK" ]; then
-    # 移除旧的我们这段（幂等）
-    sed -i '/# >>> openclash-mosdns-kit/,/# <<< openclash-mosdns-kit/d' "$OCC_HOOK"
-fi
-# 确保钩子有 shebang 和 ruby.sh
-if [ ! -f "$OCC_HOOK" ]; then
-    printf '#!/bin/sh\n. /usr/share/openclash/ruby.sh\n. /usr/share/openclash/log.sh\n. /lib/functions.sh\nCONFIG_FILE="$1"\n[ -f "$CONFIG_FILE" ] || exit 0\n' > "$OCC_HOOK"
-fi
-cat >> "$OCC_HOOK" <<EOF
+    log "写 OpenClash DNS 接管钩子..."
+    mkdir -p "$OCC_DIR"
+    if [ -f "$OCC_HOOK" ]; then
+        sed -i '/# >>> openclash-mosdns-kit/,/# <<< openclash-mosdns-kit/d' "$OCC_HOOK"
+    fi
+    if [ ! -f "$OCC_HOOK" ]; then
+        printf '#!/bin/sh\n. /usr/share/openclash/ruby.sh\n. /usr/share/openclash/log.sh\n. /lib/functions.sh\nCONFIG_FILE="$1"\n[ -f "$CONFIG_FILE" ] || exit 0\n' > "$OCC_HOOK"
+    fi
+    cat >> "$OCC_HOOK" <<EOF
 # >>> openclash-mosdns-kit
 LOG_OUT "Tip: openclash-mosdns-kit DNS takeover running..."
 ruby_edit "\$CONFIG_FILE" "['dns']['nameserver']" "['${MOSDNS_LISTEN}']"
@@ -284,26 +310,110 @@ ruby_delete "\$CONFIG_FILE" "['dns']" "fallback-filter"
 ruby_edit "\$CONFIG_FILE" "['dns']['nameserver-policy']" "${NSP}"
 # <<< openclash-mosdns-kit
 EOF
-chmod +x "$OCC_HOOK"
-log "钩子已写入 $OCC_HOOK"
+    chmod +x "$OCC_HOOK"
+    log "钩子已写入 $OCC_HOOK"
+
+    log "切换 OpenClash 到 redir-host（真实 IP 模式）..."
+    uci set openclash.config.en_mode='redir-host' 2>/dev/null
+    uci set openclash.config.operation_mode='redir-host' 2>/dev/null
+    uci commit openclash 2>/dev/null
+
+    log "重启 OpenClash（约 5-10 秒网络抖动）..."
+    /etc/init.d/openclash restart 2>/dev/null
+    sleep 8
+}
 
 # ---------------------------------------------------------------------------
-# 9. 切 redir-host（真实 IP，让竞速真正生效）
+# 7B. 接管路径：无（或未启用）OpenClash → 直接接管 dnsmasq
 # ---------------------------------------------------------------------------
-log "切换 OpenClash 到 redir-host（真实 IP 模式）..."
-uci set openclash.config.en_mode='redir-host' 2>/dev/null
-uci set openclash.config.operation_mode='redir-host' 2>/dev/null
-uci commit openclash 2>/dev/null
+takeover_dnsmasq() {
+    log "把 dnsmasq 上游指向 mosdns（dnsmasq 保留，继续管 DHCP 与本地主机名）..."
+
+    # 清掉原有 server 列表，只留 mosdns（uci set 会整体替换该 list）
+    uci set dhcp.@dnsmasq[0].server="127.0.0.1#5350" || die "uci 设置 dnsmasq server 失败"
+    # 缓存统一交给 mosdns，避免两层缓存叠加导致改配置后旧答案赖着不走
+    uci set dhcp.@dnsmasq[0].cachesize='0'
+    # 忽略 WAN 口 DHCP 下发的 resolv.conf，防止运营商 DNS 偷偷插回来
+    uci set dhcp.@dnsmasq[0].noresolv='1'
+    uci commit dhcp || die "uci commit dhcp 失败"
+    log "dnsmasq 上游 → 127.0.0.1#5350，cachesize=0，noresolv=1"
+
+    # 顺手关掉 IPv6 DNS 干扰：很多"DNS 慢"其实是 IPv6 DNS 不可达在空等
+    if uci show network.wan6 >/dev/null 2>&1; then
+        uci set network.wan6.peerdns='0' 2>/dev/null
+        uci commit network 2>/dev/null
+        log "已关闭 wan6 的 peerdns（防 IPv6 DNS 空等）"
+    fi
+
+    # 可选：nftables 劫持，把局域网里写死第三方 DNS 的设备也拽回来
+    if [ "$HIJACK_LAN_DNS" = "1" ]; then
+        command -v nft >/dev/null 2>&1 || die "HIJACK_LAN_DNS=1 需要 nft（opkg install nftables）"
+        log "追加 nftables 劫持规则（局域网 53 → mosdns:5350，接口 $LAN_IF）..."
+        nft add table inet mosdnshijack 2>/dev/null
+        nft add chain inet mosdnshijack prerouting '{ type nat hook prerouting priority dstnat ; policy accept ; }' 2>/dev/null
+        nft add rule inet mosdnshijack prerouting iifname "$LAN_IF" udp dport 53 redirect to :5350 2>/dev/null
+        nft add rule inet mosdnshijack prerouting iifname "$LAN_IF" tcp dport 53 redirect to :5350 2>/dev/null
+        # 持久化：开机加载
+        mkdir -p /etc/nftables.d 2>/dev/null
+        cat > /etc/nftables.d/mosdnshijack.nft <<NFTEOF
+table inet mosdnshijack {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        iifname "$LAN_IF" udp dport 53 redirect to :5350
+        iifname "$LAN_IF" tcp dport 53 redirect to :5350
+    }
+}
+NFTEOF
+        log "劫持规则已生效并持久化到 /etc/nftables.d/mosdnshijack.nft"
+    else
+        log "未开启局域网劫持（需要时加环境变量 HIJACK_LAN_DNS=1 重装）"
+    fi
+
+    log "重启 dnsmasq..."
+    /etc/init.d/dnsmasq restart 2>/dev/null
+    sleep 3
+}
+
+log "执行接管（模式: $KIT_MODE）..."
+if [ "$KIT_MODE" = "openclash" ]; then
+    takeover_openclash
+    # OpenClash 装了但当前未启用时，也预写钩子，日后启用自动接上
+else
+    takeover_dnsmasq
+    if [ "$HAS_OC" = "1" ]; then
+        log "预写 OpenClash 钩子（当前未启用，启用后自动接管）..."
+        mkdir -p "$OCC_DIR"
+        if [ -f "$OCC_HOOK" ]; then
+            sed -i '/# >>> openclash-mosdns-kit/,/# <<< openclash-mosdns-kit/d' "$OCC_HOOK"
+        fi
+        if [ ! -f "$OCC_HOOK" ]; then
+            printf '#!/bin/sh\n. /usr/share/openclash/ruby.sh\n. /usr/share/openclash/log.sh\n. /lib/functions.sh\nCONFIG_FILE="$1"\n[ -f "$CONFIG_FILE" ] || exit 0\n' > "$OCC_HOOK"
+        fi
+        cat >> "$OCC_HOOK" <<'EOF'
+# >>> openclash-mosdns-kit
+LOG_OUT "Tip: openclash-mosdns-kit DNS takeover running..."
+ruby_edit "$CONFIG_FILE" "['dns']['nameserver']" "['127.0.0.1:5350']"
+ruby_edit "$CONFIG_FILE" "['dns']['default-nameserver']" "['223.5.5.5']"
+ruby_delete "$CONFIG_FILE" "['dns']" "fallback"
+ruby_delete "$CONFIG_FILE" "['dns']" "fallback-filter"
+# <<< openclash-mosdns-kit
+EOF
+        chmod +x "$OCC_HOOK"
+    fi
+fi
+
+# 记录本次接管模式，供 uninstall 判断
+{
+    echo "mode=$KIT_MODE"
+    echo "has_openclash=$HAS_OC"
+    echo "hijack=$HIJACK_LAN_DNS"
+    echo "listen=$MOSDNS_LISTEN"
+    echo "installed_at=$(date '+%F %T')"
+} > "$MODE_FILE" 2>/dev/null
+log "接管模式已记录: $MODE_FILE"
 
 # ---------------------------------------------------------------------------
-# 10. 重启 OpenClash 生效
-# ---------------------------------------------------------------------------
-log "重启 OpenClash（约 5-10 秒网络抖动）..."
-/etc/init.d/openclash restart 2>/dev/null
-sleep 8
-
-# ---------------------------------------------------------------------------
-# 10.5 部署每日规则表同步（保持 CN 分流表持续更新）
+# 8. 部署每日规则表同步（保持 CN 分流表持续更新）
 # ---------------------------------------------------------------------------
 log "部署每日规则表同步脚本..."
 SYNC_SCRIPT="/root/mosdns-rule-sync.sh"
@@ -351,12 +461,16 @@ chmod +x "$SYNC_SCRIPT"
 log "每日同步已部署：$SYNC_SCRIPT（cron 03:30）"
 
 # ---------------------------------------------------------------------------
-# 11. 验证
+# 9. 验证
 # ---------------------------------------------------------------------------
 log "验证..."
 FAIL=0
 pidof mosdns >/dev/null 2>&1 || { log "✗ mosdns 未运行"; FAIL=1; }
-pidof clash >/dev/null 2>&1 || { log "✗ clash 未运行"; FAIL=1; }
+if [ "$KIT_MODE" = "openclash" ]; then
+    pidof clash >/dev/null 2>&1 || { log "✗ clash 未运行"; FAIL=1; }
+else
+    pidof dnsmasq >/dev/null 2>&1 || { log "✗ dnsmasq 未运行"; FAIL=1; }
+fi
 # 用 nslookup 测本机 mosdns
 if command -v nslookup >/dev/null 2>&1; then
     RES=$(nslookup www.baidu.com 127.0.0.1 2>/dev/null | grep -A1 "Name:" | grep Address | head -1 | awk '{print $2}')
@@ -369,9 +483,14 @@ fi
 
 if [ "$FAIL" = "0" ]; then
     log "============================================"
-    log "✅ 安装完成！"
+    log "✅ 安装完成！（接管模式: $KIT_MODE）"
     log "  mosdns: $(pidof mosdns)  监听 $MOSDNS_LISTEN"
-    log "  OpenClash: redir-host + mosdns 接管"
+    if [ "$KIT_MODE" = "openclash" ]; then
+        log "  OpenClash: redir-host + mosdns 接管"
+    else
+        log "  dnsmasq: 上游 → mosdns，缓存已交给 mosdns"
+        [ "$HIJACK_LAN_DNS" = "1" ] && log "  nftables: 局域网 53 已劫持到 mosdns"
+    fi
     log "  备份: $BACKUP_DIR"
     log "  卸载: sh uninstall.sh"
     log "============================================"
