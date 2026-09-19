@@ -63,9 +63,15 @@ fi
 if [ -n "$LATEST_BACKUP" ] && [ -f "$LATEST_BACKUP/openclash_custom_overwrite.sh.bak" ]; then
     log "从备份还原 OpenClash 钩子: $LATEST_BACKUP"
     cp -a "$LATEST_BACKUP/openclash_custom_overwrite.sh.bak" "$OCC_HOOK"
-elif [ -f "$OCC_HOOK" ]; then
-    log "无备份，仅移除 kit 注入的段..."
+fi
+# ⚠ 关键：备份本身可能已被上一次安装污染（重复 install 会备份"已含 kit 段"的钩子）。
+#   所以无论走哪条路，还原后都必须再剥一次 kit 段，否则钩子会把 DNS 指向已删除的
+#   mosdns:5350 → fake-ip 模式下国内域名（不伪造、需真解析）直接 DNS 黑洞。
+if [ -f "$OCC_HOOK" ]; then
+    BEFORE=$(grep -c 'openclash-mosdns-kit' "$OCC_HOOK" 2>/dev/null || echo 0)
     sed -i '/# >>> openclash-mosdns-kit/,/# <<< openclash-mosdns-kit/d' "$OCC_HOOK"
+    AFTER=$(grep -c 'openclash-mosdns-kit' "$OCC_HOOK" 2>/dev/null || echo 0)
+    log "钩子 kit 段清除：$BEFORE → $AFTER 行残留"
 fi
 
 # 5. 还原 openclash UCI（redir-host → 原值）
