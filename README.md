@@ -49,7 +49,7 @@ OpenClash 侧通过 `openclash_custom_overwrite.sh` 钩子把 `dns.nameserver` �
 
 | 检测结果 | 接管模式 | 接管方式 |
 |---|---|---|
-| OpenClash 已装**且启用** | `openclash` | 写 OpenClash 钩子把 DNS 指向 mosdns + 切 redir-host + 订阅域名直连策略 |
+| OpenClash 已装**且启用** | `openclash` | 写 OpenClash 钩子把 DNS 指向 mosdns + **保持 fake-ip** + 订阅域名直连策略 |
 | OpenClash 装了但**未启用** | `dnsmasq` | dnsmasq 上游直连 mosdns；同时预写 OpenClash 钩子，日后启用自动接上 |
 | **没装** OpenClash | `dnsmasq` | dnsmasq 上游直连 mosdns，缓存交给 mosdns，关 wan6 peerdns |
 
@@ -115,7 +115,7 @@ sh uninstall.sh
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `CHN_UP1/2` | 阿里 / 腾讯 DNS | 国内竞速上游 |
-| `BAK_UP1/2` | 阿里 DoH / DNSPod DoH | 加密备份上游（国内可达，不依赖代理） |
+| `BAK_UP1/2` | 按模式自动 | 兜底上游：OpenClash 模式用国内 DNS 快速应答（国外走 fake-ip+代理），dnsmasq 模式用境外 DoH（无代理时的唯一出路） |
 | `RACE_THRESHOLD` | 100 | 竞速阈值(ms) |
 | `GH_PROXY` | 空 | GitHub 加速前缀 |
 | `HIJACK_LAN_DNS` | 0 | 无 OpenClash 模式下是否劫持局域网 53 端口（1=开启） |
@@ -125,8 +125,8 @@ sh uninstall.sh
 
 1. 只优化 DNS，不改变代理出口。
 2. 污染判定依赖 `IPchnroute` 准确性，个别 CDN IP 变更会误判（表现为该域名重查慢 100ms，仍能拿到答案），定期更新规则表即可。
-3. redir-host 模式下个别强依赖 fake-ip 的 APP 可能需要额外白名单。
-4. 加密备份上游是国内服务器，纯国内环境即可连通。
+3. OpenClash 模式保持 fake-ip：个别强依赖真实 IP 的 APP 需加入 OpenClash 的 fake-ip-filter 白名单（脚本已把订阅域名等自动放行）。
+4. 兜底上游按模式自动选择：OpenClash 模式为国内 DNS（纯国内环境即可连通），dnsmasq 模式为境外加密 DNS（需网络可达）。
 
 ## License
 
