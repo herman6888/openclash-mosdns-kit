@@ -24,6 +24,9 @@ MOSDNS_LISTEN="127.0.0.1:5350"
 # 国内上游（并发竞速）
 CHN_UP1="223.5.5.5:53"      # 阿里 DNS
 CHN_UP2="119.29.29.29:53"   # 腾讯 DNSPod
+CHN_UP3="114.114.114.114:53"  # 114 DNS
+CHN_UP4="117.50.10.10:53"     # CNNIC DNS
+CHN_UP5="223.6.6.6:53"        # 阿里备用
 # 兜底上游（非国内域名用）—— 按接管模式区分，见下方赋值
 # 架构说明：
 #   OpenClash 模式：国外域名由 OpenClash fake-ip 秒回假地址、代理节点真解析（干净且稳），
@@ -220,10 +223,13 @@ plugins:
   - tag: forward_chn
     type: forward
     args:
-      concurrent: 2
+      concurrent: 5
       upstreams:
         - addr: ${CHN_UP1}
         - addr: ${CHN_UP2}
+        - addr: ${CHN_UP3}
+        - addr: ${CHN_UP4}
+        - addr: ${CHN_UP5}
 
   - tag: forward_bak
     type: forward
