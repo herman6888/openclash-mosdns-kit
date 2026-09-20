@@ -24,16 +24,15 @@ MOSDNS_LISTEN="127.0.0.1:5350"
 # 国内上游（并发竞速）
 CHN_UP1="223.5.5.5:53"      # 阿里 DNS
 CHN_UP2="119.29.29.29:53"   # 腾讯 DNSPod
-# 加密备份上游（境外域名用，必须答案干净）
-# ⚠ 实测教训：阿里 dns.alidns.com / 腾讯 doh.pub 是【境内】DoH，
-#   对境外被墙域名返回的正是污染答案（youtube→Twitter段/Facebook段）。
-#   境外序列必须用境外 DoH：dns.google / cloudflare-dns.com（443 直连可达且答案干净）。
-BAK_UP1="https://dns.google/dns-query"
-BAK_UP2="https://cloudflare-dns.com/dns-query"
-# DoH bootstrap：解析 DoH 域名本身所用的 DNS 解析器（53 端口），
-# 关键——mosdns 解析 DoH 域名不能走系统 resolv.conf（=dnsmasq→clash→mosdns 死循环）。
-# ⚠ bootstrap 必须是「53 端口能解析该域名」的解析器 IP，不是 DoH 服务器自己的 IP。
-#   实测：223.5.5.5:53 可干净解析 dns.google→8.8.8.8 / cloudflare-dns.com。
+# 兜底上游（非国内域名用）—— 按接管模式区分，见下方赋值
+# 架构说明：
+#   OpenClash 模式：国外域名由 OpenClash fake-ip 秒回假地址、代理节点真解析（干净且稳），
+#     mosdns 只加速 fake-ip-filter 放行回源的国内域名。兜底用国内 DNS 快速应答即可，
+#     彻底不碰境外 DoH —— 实测境内裸连境外 DoH 间歇 TLS 超时，押它会偶发解析失败。
+#   dnsmasq 模式（无代理）：国外域名没有代理可走，境外 DoH 是唯一出路，必须保留。
+# ⚠ 实测教训：阿里/腾讯 DoH 是【境内】节点，对境外被墙域名返回污染答案，不能当境外上游。
+BAK_UP1=""   # 在模式检测后按 KIT_MODE 赋值
+BAK_UP2=""
 BAK_BOOT1="223.5.5.5"
 BAK_BOOT2="223.5.5.5"
 # 规则表源（CN 网段/域名分流表，每日自动更新）
@@ -120,8 +119,14 @@ OC_ENABLED="$(uci get openclash.config.enable 2>/dev/null || true)"
 if [ "$HAS_OC" = "1" ] && [ "$OC_ENABLED" = "1" ]; then
     KIT_MODE="openclash"
     log "检测到已启用的 OpenClash → 接管模式：OpenClash DNS 指向 mosdns"
+    # 国外走 fake-ip+代理，mosdns 兜底用国内 DNS（不押境外 DoH）
+    BAK_UP1="223.5.5.5:53"
+    BAK_UP2="119.29.29.29:53"
 else
     KIT_MODE="dnsmasq"
+    # 无代理：国外域名唯一出路是境外 DoH（答案干净），必须保留
+    BAK_UP1="https://dns.google/dns-query"
+    BAK_UP2="https://cloudflare-dns.com/dns-query"
     if [ "$HAS_OC" = "1" ]; then
         log "检测到 OpenClash 但未启用（enable=$OC_ENABLED）→ 接管模式：dnsmasq 直连 mosdns"
         log "（同时预写 OpenClash 钩子，日后启用 OpenClash 会自动接上 mosdns）"
@@ -245,7 +250,7 @@ plugins:
         exec: accept
       - exec: drop_resp
 
-  # 通用序列：走加密备份上游
+  # 兜底序列：非国内域名（fake-ip 模式下极少走到这里），国内 DNS 快速应答
   - tag: global_sequence
     type: sequence
     args:
@@ -359,10 +364,19 @@ takeover_openclash() {
     write_takeover_hook "$NSP"
     log "钩子已写入 $OCC_HOOK"
 
-    log "切换 OpenClash 到 redir-host（真实 IP 模式）..."
-    uci set openclash.config.en_mode='redir-host' 2>/dev/null
-    uci set openclash.config.operation_mode='redir-host' 2>/dev/null
-    uci commit openclash 2>/dev/null
+    # 保持 fake-ip：国外域名由 OpenClash 秒回假地址、代理节点真解析（干净且稳），
+    # mosdns 只负责加速 fake-ip-filter 放行回源的国内域名。
+    # 不切 redir-host —— 实测境内裸连境外 DoH 不稳定，redir-host 会把国外解析
+    # 押在境外 DoH 上，偶发解析失败。fake-ip 模式彻底规避这一点。
+    CUR_MODE="$(uci get openclash.config.en_mode 2>/dev/null || echo unknown)"
+    if [ "$CUR_MODE" = "redir-host" ]; then
+        log "当前为 redir-host，切回 fake-ip（国外走代理解析，更稳）..."
+        uci set openclash.config.en_mode='fake-ip' 2>/dev/null
+        uci set openclash.config.operation_mode='fake-ip' 2>/dev/null
+        uci commit openclash 2>/dev/null
+    else
+        log "保持 fake-ip 模式（国外域名走代理节点解析，不依赖境外 DoH）..."
+    fi
 
     log "重启 OpenClash（约 5-10 秒网络抖动）..."
     /etc/init.d/openclash restart 2>/dev/null
@@ -516,7 +530,7 @@ if [ "$FAIL" = "0" ]; then
     log "✅ 安装完成！（接管模式: $KIT_MODE）"
     log "  mosdns: $(pidof mosdns)  监听 $MOSDNS_LISTEN"
     if [ "$KIT_MODE" = "openclash" ]; then
-        log "  OpenClash: redir-host + mosdns 接管"
+        log "  OpenClash: fake-ip（国外走代理解析）+ mosdns 加速国内"
     else
         log "  dnsmasq: 上游 → mosdns，缓存已交给 mosdns"
         [ "$HIJACK_LAN_DNS" = "1" ] && log "  nftables: 局域网 53 已劫持到 mosdns"
