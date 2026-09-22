@@ -18,12 +18,14 @@ BACKUP_ROOT="/root"
 # 读安装时记录的模式
 KIT_MODE="openclash"
 HIJACK="0"
+VPS_IP=""
 if [ -f "$MODE_FILE" ]; then
     KIT_MODE=$(grep -m1 '^mode=' "$MODE_FILE" 2>/dev/null | cut -d= -f2)
     HIJACK=$(grep -m1 '^hijack=' "$MODE_FILE" 2>/dev/null | cut -d= -f2)
+    VPS_IP=$(grep -m1 '^vps_ip=' "$MODE_FILE" 2>/dev/null | cut -d= -f2)
     [ -n "$KIT_MODE" ] || KIT_MODE="openclash"
 fi
-log "识别到安装模式: $KIT_MODE（劫持=$HIJACK）"
+log "识别到安装模式: $KIT_MODE（劫持=$HIJACK，VPS=${VPS_IP:-无}）"
 
 # 找最近一次安装备份
 LATEST_BACKUP=$(ls -d "$BACKUP_ROOT"/openclash-mosdns-kit-backup-* 2>/dev/null | sort | tail -1)
@@ -63,6 +65,15 @@ fi
 if [ -n "$LATEST_BACKUP" ] && [ -f "$LATEST_BACKUP/openclash_custom_overwrite.sh.bak" ]; then
     log "从备份还原 OpenClash 钩子: $LATEST_BACKUP"
     cp -a "$LATEST_BACKUP/openclash_custom_overwrite.sh.bak" "$OCC_HOOK"
+fi
+# VPS bypass 防火墙钩子同样剥掉 kit 段（无论有无备份，防污染残留）
+OCC_FW_HOOK="/etc/openclash/custom/openclash_custom_firewall_rules.sh"
+if [ -f "$OCC_FW_HOOK" ]; then
+    FW_BEFORE=$(grep -c 'openclash-mosdns-kit' "$OCC_FW_HOOK" 2>/dev/null || echo 0)
+    if [ "$FW_BEFORE" != "0" ]; then
+        sed -i '/# >>> openclash-mosdns-kit/,/# <<< openclash-mosdns-kit/d' "$OCC_FW_HOOK"
+        log "VPS bypass 钩子段已清除（$FW_BEFORE 行）"
+    fi
 fi
 # ⚠ 关键：备份本身可能已被上一次安装污染（重复 install 会备份"已含 kit 段"的钩子）。
 #   所以无论走哪条路，还原后都必须再剥一次 kit 段，否则钩子会把 DNS 指向已删除的
