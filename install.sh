@@ -38,8 +38,7 @@ CHN_UP5="223.6.6.6:53"        # 阿里备用
 #     境外 DoH 间歇 TLS 超时，押它会偶发解析失败。
 #   dnsmasq 模式（无代理）：国外域名没有代理可走，境外 DoH 是唯一出路，必须保留。
 # ⚠ 实测教训：阿里/腾讯 DoH 是【境内】节点，对境外被墙域名返回污染答案，不能当境外上游。
-BAK_UP1=""   # 在模式检测后按 KIT_MODE 赋值
-BAK_UP2=""
+BAK_UPSTREAMS=""   # 在模式检测后按 KIT_MODE 赋值（多路竞速 upstreams YAML 片段）
 BAK_BOOT1="223.5.5.5"
 BAK_BOOT2="223.5.5.5"
 # 规则表源（CN 网段表，每日自动更新）
@@ -160,21 +159,28 @@ if [ "$HAS_OC" = "1" ] && [ "$OC_ENABLED" = "1" ]; then
     KIT_MODE="openclash"
     log "检测到已启用的 OpenClash → 接管模式：OpenClash DNS 指向 mosdns"
     if [ -n "$VPS_IP" ]; then
-        BAK_UP1="tls://${VPS_IP}:853"
-        BAK_UP2="tls://${VPS_IP}:853"
+        # 多路竞速：自建 VPS DoT + 公共 DoH 同时赛跑，谁快用谁。
+        # 单押 VPS 线路一旦抖动（丢包/高延迟），境外解析集体超时；
+        # 多路并发后任一路线活着即可，线路故障不再等于解析故障。
+        BAK_UPSTREAMS="        - addr: tls://${VPS_IP}:853
+          insecure_skip_verify: true
+        - addr: https://dns.google/dns-query
+        - addr: https://cloudflare-dns.com/dns-query
+        - addr: https://baseline.cz/dns-query"
     else
         # 国外走 fake-ip+代理，mosdns 兜底用国内 DNS（不押境外 DoH）
-        BAK_UP1="223.5.5.5:53"
-        BAK_UP2="119.29.29.29:53"
+        BAK_UPSTREAMS="        - addr: 223.5.5.5:53
+        - addr: 119.29.29.29:53"
     fi
 else
     if [ -n "$VPS_IP" ]; then
         die "VPS 模式必须安装并启用 OpenClash。请先装好 OpenClash 并配好订阅再跑 install-vps.sh。"
     fi
     KIT_MODE="dnsmasq"
-    # 无代理：国外域名唯一出路是境外 DoH（答案干净），必须保留
-    BAK_UP1="https://dns.google/dns-query"
-    BAK_UP2="https://cloudflare-dns.com/dns-query"
+    # 无代理：国外域名唯一出路是境外 DoH（答案干净），多路竞速降低单点故障
+    BAK_UPSTREAMS="        - addr: https://dns.google/dns-query
+        - addr: https://cloudflare-dns.com/dns-query
+        - addr: https://baseline.cz/dns-query"
     if [ "$HAS_OC" = "1" ]; then
         log "检测到 OpenClash 但未启用（enable=$OC_ENABLED）→ 接管模式：dnsmasq 直连 mosdns"
         log "（同时预写 OpenClash 钩子，日后启用 OpenClash 会自动接上 mosdns）"
@@ -259,6 +265,7 @@ cloudflare-ech.com
 ech.cloudflare.com
 cloudflare-dns.com
 dns.google
+baseline.cz
 DDEOF
 log "直通名单已写入 $INSTALL_DIR/domains.direct.txt（ECH 基础设施）"
 
@@ -274,9 +281,6 @@ fi
 # 5. 生成 mosdns 配置（v4：resp_ip 兜底，不靠域名表）
 # ---------------------------------------------------------------------------
 log "生成 mosdns 配置..."
-VPS_TLS_OPT=""
-[ -n "$VPS_IP" ] && VPS_TLS_OPT="
-          insecure_skip_verify: true"
 
 cat > "$INSTALL_DIR/config.yaml" <<EOF
 log:
@@ -298,10 +302,9 @@ plugins:
   - tag: forward_bak
     type: forward
     args:
-      concurrent: 2
+      concurrent: 4
       upstreams:
-        - addr: ${BAK_UP1}${VPS_TLS_OPT}
-        - addr: ${BAK_UP2}${VPS_TLS_OPT}
+${BAK_UPSTREAMS}
 
   # 直连序列：ECH 基础设施 + 代理节点 server 域名专用。
   # vless+ECH 节点握手前必须先拉 cloudflare-ech.com 的 HTTPS(TYPE65) RR，
