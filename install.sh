@@ -94,7 +94,7 @@ write_takeover_hook() {
             sed -i '$d' "$OCC_HOOK"
         done
     else
-        printf '#!/bin/sh\n. /usr/share/openclash/ruby.sh\n. /usr/share/openclash/log.sh\n. /lib/functions.sh\nCONFIG_FILE="$1"\n[ -f "$CONFIG_FILE" ] || exit 0\n' > "$OCC_HOOK"
+        printf '#!/bin/sh\n. /usr/share/openclash/ruby.sh\n. /usr/share/openclash/log.sh\n. /lib/functions.sh\n[ -f "$CONFIG_FILE" ] || exit 0\n' > "$OCC_HOOK"
     fi
     # 保底：EOF 必须有换行，否则又会粘连
     [ -s "$OCC_HOOK" ] && [ "$(tail -c 1 "$OCC_HOOK" | wc -l)" -eq 0 ] && echo "" >> "$OCC_HOOK"
@@ -107,6 +107,12 @@ write_takeover_hook() {
         echo "ruby_delete \"\$CONFIG_FILE\" \"['dns']\" \"fallback\""
         echo "ruby_delete \"\$CONFIG_FILE\" \"['dns']\" \"fallback-filter\""
         [ -n "$NSP_ARG" ] && echo "ruby_edit \"\$CONFIG_FILE\" \"['dns']['nameserver-policy']\" \"${NSP_ARG}\""
+        # 节点直通策略（ECH 关键）：每次生成配置后固定节点域名 + 刷新 mosdns 直通名单
+        if [ "${2:-}" = "1" ]; then
+            echo "if command -v ruby >/dev/null 2>&1 && [ -f \"${OCC_DIR}/kit_node_policy.rb\" ]; then"
+            echo "    ruby \"${OCC_DIR}/kit_node_policy.rb\" \"\$CONFIG_FILE\" \"${INSTALL_DIR}/domains.direct.txt\" >/dev/null 2>&1 && LOG_OUT \"Tip: node server domains pinned to CN DNS\""
+            echo "fi"
+        fi
         echo "# <<< openclash-mosdns-kit"
         echo "exit 0"
     } >> "$OCC_HOOK"
@@ -247,6 +253,23 @@ fetch "${GH_PROXY}${RULE_BASE}/IPchnroute" "$INSTALL_DIR/IPchnroute" || die "网
 IP_LINES=$(wc -l < "$INSTALL_DIR/IPchnroute" 2>/dev/null || echo 0)
 log "网段表就绪: IPchnroute=${IP_LINES} 行"
 
+# ECH 基础设施直通名单（OpenClash 模式下会由 kit_node_policy.rb 追加节点域名）
+cat > "$INSTALL_DIR/domains.direct.txt" <<'DDEOF'
+cloudflare-ech.com
+ech.cloudflare.com
+cloudflare-dns.com
+dns.google
+DDEOF
+log "直通名单已写入 $INSTALL_DIR/domains.direct.txt（ECH 基础设施）"
+
+# 节点直通策略脚本随安装带入（OpenClash 钩子会调用它）
+SELF_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /tmp)"
+if [ -f "$SELF_DIR/scripts/kit_node_policy.rb" ]; then
+    cp -f "$SELF_DIR/scripts/kit_node_policy.rb" "$INSTALL_DIR/kit_node_policy.rb"
+    chmod 0644 "$INSTALL_DIR/kit_node_policy.rb"
+    log "节点直通策略脚本已部署: $INSTALL_DIR/kit_node_policy.rb"
+fi
+
 # ---------------------------------------------------------------------------
 # 5. 生成 mosdns 配置（v4：resp_ip 兜底，不靠域名表）
 # ---------------------------------------------------------------------------
@@ -279,6 +302,18 @@ plugins:
       upstreams:
         - addr: ${BAK_UP1}${VPS_TLS_OPT}
         - addr: ${BAK_UP2}${VPS_TLS_OPT}
+
+  # 直连序列：ECH 基础设施 + 代理节点 server 域名专用。
+  # vless+ECH 节点握手前必须先拉 cloudflare-ech.com 的 HTTPS(TYPE65) RR，
+  # 这类查询若走"非 CN 答案即丢弃"逻辑会拿不到 ECH 配置 → 全部 ECH 节点挂。
+  # 上游必须选透传 HTTPS RR 的公共 DNS。
+  - tag: forward_direct
+    type: forward
+    args:
+      concurrent: 2
+      upstreams:
+        - addr: 223.5.5.5:53
+        - addr: 119.29.29.29:53
 
   - tag: cache
     type: cache
@@ -318,6 +353,13 @@ plugins:
     type: sequence
     args:
       - exec: \$cache
+      # 直通名单（ECH 基础设施 + 节点域名）：命中即返回，不再进 race。
+      # 注意 mosdns sequence 语义：插件设了 response 不会自动停止，
+      # 必须用 has_resp 守卫提前 accept，否则后面的 \$race 会覆盖好答案。
+      - matches: qname &${INSTALL_DIR}/domains.direct.txt
+        exec: \$forward_direct
+      - matches: has_resp
+        exec: accept
       - exec: \$race
 
   - type: udp_server
@@ -445,7 +487,16 @@ takeover_openclash() {
     [ $first -eq 1 ] && NSP="{}"
 
     log "写 OpenClash DNS 接管钩子..."
-    write_takeover_hook "$NSP"
+    # 部署节点直通策略脚本：每次 OpenClash 生成配置后，把全部节点 server 域名
+    # 固定到国内 DNS 直解 + 加 fake-ip-filter + 刷新 mosdns 直通名单。
+    # （订阅里出现 ECH 节点时，这一步是节点能否连上的关键）
+    RB_HOOK=""
+    if [ -f "$INSTALL_DIR/kit_node_policy.rb" ]; then
+        cp -f "$INSTALL_DIR/kit_node_policy.rb" "$OCC_DIR/kit_node_policy.rb" 2>/dev/null
+        chmod 0755 "$OCC_DIR/kit_node_policy.rb" 2>/dev/null
+    fi
+    [ -f "$OCC_DIR/kit_node_policy.rb" ] && RB_HOOK="1"
+    write_takeover_hook "$NSP" "$RB_HOOK"
     log "钩子已写入 $OCC_HOOK"
 
     # 有 VPS 时放行 VPS 流量（防 DoT 被 TUN 劫持成环）
