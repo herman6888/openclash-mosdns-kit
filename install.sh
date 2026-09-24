@@ -224,6 +224,8 @@ log "备份目录: $BACKUP_DIR"
 # ---------------------------------------------------------------------------
 # 3. 下载 mosdns 二进制
 # ---------------------------------------------------------------------------
+# 在任何 cd 之前捕获脚本所在目录（供离线/本地文件通道使用）
+SELF_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /tmp)"
 mkdir -p "$INSTALL_DIR"
 cd /tmp
 # 幂等：已装且版本一致就跳过（省 20MB，也让重试不必重下）
@@ -233,15 +235,21 @@ if [ "$CUR_VER" = "$MOSDNS_VERSION" ]; then
     log "已安装 mosdns v$MOSDNS_VERSION，跳过下载与解压"
 else
     log "下载 mosdns v$MOSDNS_VERSION ..."
-    rm -f /tmp/mosdns.zip /tmp/mosdns
     DL_PATH="https://github.com/IrineSistiana/mosdns/releases/download/v${MOSDNS_VERSION}/${MOS_PKG}"
     OK=0
-    # 先试用户指定前缀，再试直连，最后试公共加速站
-    for pre in "${GH_PROXY}" "" "https://gh-proxy.com/" "https://ghfast.top/"; do
-        [ "$OK" = "1" ] && break
-        log "  尝试源: ${pre:-（直连）}"
-        fetch "${pre}${DL_PATH}" /tmp/mosdns.zip && [ -s /tmp/mosdns.zip ] && OK=1
-    done
+    # 离线支持：/tmp/mosdns.zip 已存在且是合法 zip 就直接用（GitHub 不可达时的手动通道）
+    if [ -s /tmp/mosdns.zip ] && unzip -t /tmp/mosdns.zip mosdns >/dev/null 2>&1; then
+        log "  检测到本地 /tmp/mosdns.zip 完整可用，跳过下载"
+        OK=1
+    else
+        rm -f /tmp/mosdns.zip /tmp/mosdns
+        # 先试用户指定前缀，再试直连，最后试公共加速站
+        for pre in "${GH_PROXY}" "" "https://gh-proxy.com/" "https://ghfast.top/"; do
+            [ "$OK" = "1" ] && break
+            log "  尝试源: ${pre:-（直连）}"
+            fetch "${pre}${DL_PATH}" /tmp/mosdns.zip && [ -s /tmp/mosdns.zip ] && OK=1
+        done
+    fi
     [ "$OK" = "1" ] || die "下载失败: $DL_PATH（GitHub 暂时不可达，稍后重试或手动放 zip 到 /tmp/mosdns.zip）"
     command -v unzip >/dev/null 2>&1 || die "需要 unzip（opkg update && opkg install unzip）"
     unzip -o mosdns.zip mosdns >/dev/null 2>&1 || unzip -o mosdns.zip >/dev/null
@@ -255,7 +263,13 @@ fi
 # 4. 下载 CN 网段表（防污染判定用；v4 核心不依赖域名表完整性）
 # ---------------------------------------------------------------------------
 log "下载 CN 网段表（IPchnroute）..."
-fetch "${GH_PROXY}${RULE_BASE}/IPchnroute" "$INSTALL_DIR/IPchnroute" || die "网段表下载失败"
+# 离线支持：本地已有预置表（/tmp/IPchnroute）且行数达标就直接用
+if [ -s /tmp/IPchnroute ] && [ "$(wc -l < /tmp/IPchnroute)" -ge 5000 ]; then
+    cp -f /tmp/IPchnroute "$INSTALL_DIR/IPchnroute"
+    log "  使用本地预置网段表 /tmp/IPchnroute"
+else
+    fetch "${GH_PROXY}${RULE_BASE}/IPchnroute" "$INSTALL_DIR/IPchnroute" || die "网段表下载失败（可手动放表到 /tmp/IPchnroute 重试）"
+fi
 IP_LINES=$(wc -l < "$INSTALL_DIR/IPchnroute" 2>/dev/null || echo 0)
 log "网段表就绪: IPchnroute=${IP_LINES} 行"
 
@@ -270,8 +284,8 @@ DDEOF
 log "直通名单已写入 $INSTALL_DIR/domains.direct.txt（ECH 基础设施）"
 
 # 节点直通策略脚本随安装带入（OpenClash 钩子会调用它）
-SELF_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /tmp)"
-if [ -f "$SELF_DIR/scripts/kit_node_policy.rb" ]; then
+# 注意：SELF_DIR 必须在任何 cd 之前捕获（脚本中段有 cd /tmp，会让 dirname $0 失效）
+if [ -f "${SELF_DIR}/scripts/kit_node_policy.rb" ]; then
     cp -f "$SELF_DIR/scripts/kit_node_policy.rb" "$INSTALL_DIR/kit_node_policy.rb"
     chmod 0644 "$INSTALL_DIR/kit_node_policy.rb"
     log "节点直通策略脚本已部署: $INSTALL_DIR/kit_node_policy.rb"
